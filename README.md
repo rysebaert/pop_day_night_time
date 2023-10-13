@@ -7,7 +7,7 @@ The GHSL - Global Human Settlement Layer proposes a data viewer to interactively
 - Compare monthes, daytime and nightime. The user must change the layer selected manually.
 - Observe spatial trends outside the mosaic of grid cells.
 
-We propose in this notebook a methodological framework for analysing the seasonal and daytime changes based on spatial interpolation method (Stewart (1942)), allowing to observe the phenomenon on a continuous surface from a set of discrete points.
+We propose in **[this notebook](https://rysebaert.github.io/pop_day_night_time/)** a methodological framework for analysing the seasonal and daytime changes based on spatial interpolation method (Stewart (1942)), allowing to observe the phenomenon on a continuous surface from a set of discrete points.
 
 ![](fig.png)
 
