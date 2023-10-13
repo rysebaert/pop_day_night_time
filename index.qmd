@@ -1,0 +1,588 @@
+---
+title: "Population over the day, the night, the seasons"
+execute:
+  warning: false
+  message: false
+author:
+  - name: Ronan Ysebaert 
+    url: https://rysebaert.github.io/climbing_paris/
+    affiliation: UAR RIATE, Université Paris Cité, CNRS
+    affiliation-url: https://riate.cnrs.fr/
+citation: true
+date: "`r Sys.Date()`"
+bibliography: bib.bib
+format:
+  html:
+    theme: sandstone
+    fontsize: 0.9em
+    code-tools: true
+    code-fold: true
+    toc: true
+    toc-depth: 2
+    css: "styles.css"
+    linkcolor: "#8631ad"
+editor_options: 
+  chunk_output_type: console
+---
+
+
+# General objectives and data presentation
+
+The [ENACT-POP R2020A dataset](https://ghsl.jrc.ec.europa.eu/ENACT_POP.php) is a spatial raster dataset provided by JRC (@schiavina2020). It depicts the seasonal nightime and daytime population in a 1km grid resolution for 2011. It covers EU28.
+
+These 24 datasets (one for each month, and one for daytime and nightime) are bassed on a *multi-layered dasymetric approach tjat models the spatial distribution of different population groups sepatately and according to a selection of covariates derived from novel geospatial data sources* (@batista2020)
+
+It follows four interlinked phases @batista2020 :
+
+1. **Estimation of monthly and regional stocks of population groups**: residents, employees by economic sectors, students by education level, non-working and non-studying population, tourists (provided by Eurostat). 
+2. **Mapping of Land Use features relevant to the location of the population groups**: 11 artificial land use classes (Corine Land Cover 2012) including production facilities, commercial and service facilities, public facilities and airport terminals. It has been associated to Point of Interests (TomTom Multinet and OpenStreetMap) to present locations of activities and facilities associated to students and workers. For each population group, the relevant features were processed into a signle binay raster layer with a 100 x 100m resolution. For the disaggregation of tourists, they built a layer reporting touristic accomodation room density based on data from online booking platforms.  
+3. **Dasymetric dissaggregation of population groups stocks to their most likely locations within regions** : the stock of a population group within a region is first divided over the land use types relvant to that group proportional to the occurence of these land use types within the region. The downscaling procedure generates 204 intermediate population grids (12 months x 17 population groups) at a spatial resolution of 100 metres. For each month of the year, the respective nighttime population grid was the result of the sum of the gridded residents with the gridded tourists at nighttime. Conversely, the daytime population grid was the result of the sum of the 15 remainder population group grids. The final 24 grids were obtained by aggregating the 100 m pixel values to the target 1 km2 grid cells.
+4. Quality asssesmment by means of a cross-comparison against independ datasets for selected countries : with comuting of students and workers for Italy, Spain and Portugal ; cellphone reccords in Belgium.  
+
+The GHSL - Global Human Settlement Layer proposes a data viewer to interactively explore the results, [here](https://ghsl.jrc.ec.europa.eu/enactVisualisation.php). However, the tool is not especially suitable to :
+
+(1) Compare monthes, daytime and nightime. The user must change the layer selected manually. 
+(2) Observe spatial trends outside the mosaic of grid cells. 
+
+We propose consequently in this notebook a methodological framework for analysing the seasonal and daytime changes based on spatial interpolation method (@stewart1942), allowing to observe the phenomenon on a continuous surface from a set of discrete points. 
+
+
+## R Libraries
+
+NUTS units are imported with the [`giscoR`](https://cran.r-project.org/web/packages/giscoR/index.html) package
+
+For spatial data handling, [`terra`](https://cran.r-project.org/web/packages/terra/index.html) is used for manipulating raster tiles, [`sf`](https://cran.r-project.org/web/packages/sf/index.html) for manipulating vector geometries, [`potential`](https://cran.r-project.org/web/packages/potential/index.html) for implementing the Potential model as definded by @stewart1942.
+
+[`mapsf`](https://cran.r-project.org/web/packages/mapsf/index.html) is used for thematic mapping and [`maptiles`](https://cran.r-project.org/web/packages/maptiles/index.html) for displaying some useful labels on maps. 
+
+```{r}
+# Import data
+library(giscoR)
+
+# Manupulating geographical objects
+library(terra)
+library(sf)
+library(potential)
+
+# Mapping
+library(mapsf)
+library(maptiles)
+```
+
+
+## Import and view input data
+
+Import and view raw data. It corresponds to rasters covering all Europe. Three layers are imported :
+
+- Population in January, daytime.
+- Population in January, nightime.
+- Population in August, daytime. 
+
+Here is a map of the raw data. 
+
+```{r}
+# Import data
+JAN_D <- rast("data-raw/ENACT_POP_D012011_EU28_R2020A_3035_1K_V1_0.tif")
+JAN_N <- rast("data-raw/ENACT_POP_N012011_EU28_R2020A_3035_1K_V1_0.tif")
+AOU_D <- rast("data-raw/ENACT_POP_D082011_EU28_R2020A_3035_1K_V1_0.tif")
+
+# View
+plot(JAN_D)
+```
+
+
+# Methodologicial framework applied to Ile-de-France
+
+## Data processing
+
+The raster is reprojected in the European reference projection. 
+
+```{r}
+JAN_D <- project(x= JAN_D, y =  "EPSG:3035", method = "bilinear")
+```
+
+Import European regions with `giscoR` R package, that will be used for selecting regions of interest. 
+
+```{r}
+nuts1 <- gisco_get_nuts(year = "2021", epsg = "3035", resolution = "03", 
+                        nuts_level = "1")
+nuts2 <- gisco_get_nuts(year = "2021", epsg = "3035", resolution = "03", 
+                        nuts_level = "2")
+nuts3 <- gisco_get_nuts(year = "2021", epsg = "3035", resolution = "03", 
+                        nuts_level = "3")
+```
+
+We then choose the Ile-de-France region (FR10). Territorial unit is extracted from the original NUTS layer, rasterized and croped to the original layer.  
+
+```{r}
+# Select region
+nuts_code <- "FR10"
+nuts2_sel <- nuts2[nuts2$NUTS_ID == nuts_code,]
+nuts3_sel <- nuts3[substr(nuts3$NUTS_ID, 1, 4) == nuts_code,]
+
+# Transform to raster
+sel <- vect(nuts2_sel)
+
+# Crop and mask the original layer to the region of interest
+crop_JAN_D <- crop(JAN_D, sel)
+mask_JAN_D <- mask(crop_JAN_D, sel)
+
+# See result
+plot(mask_JAN_D)
+```
+
+This raster is afterwards vectorized. We give an unique ID and a given column name for simplifying furtuer operation and merges. The map below shows the resulting output vectorized layer. 
+
+```{r}
+# Vectorize result
+JAN_D_sel <- as.points(mask_JAN_D)
+JAN_D_sel <- st_as_sf(JAN_D_sel)
+
+# Harmonize column names
+JAN_D_sel$ID <- row.names(JAN_D_sel)
+colnames(JAN_D_sel)[1] <- "POP_JANV_D_2011"
+
+# Map of values above 1
+tmp <- JAN_D_sel[JAN_D_sel$POP_JANV_D_2011 > 1,]
+tmp2 <- JAN_D_sel[JAN_D_sel$POP_JANV_D_2011 < 1,]
+mf_map(tmp2, pch = 21, col = "lightgrey", cex = .6, border = NA) 
+mf_map(tmp, pch = 21, var = "POP_JANV_D_2011", type = "choro", nbreaks = 8,
+       border = NA, cex = .6, add = TRUE) 
+```
+
+We implement a function to do all this stuff in a synthetic way. It allows to build vector layer for a reference input layer (the raw files) according to a region of interest. This is done for the layer with population in nightime in January (JAN_N) and daytime in August (AOU_D).
+
+```{r}
+enact_extract <- function(x, var_name, sel){
+  # Reproject data
+  x <- project(x= x, y =  "EPSG:3035", method = "bilinear")
+  
+  # Filter for a given region
+  sel <- vect(sel)
+  
+  x <- crop(x, sel)
+  x <- mask(x, sel)
+  
+  # Vectorize output
+  x <- as.points(x)
+  x <- st_as_sf(x)
+  
+  # Identifiers and colnames
+  x$ID <- row.names(x)
+  colnames(x)[1] <- var_name
+  return(x)
+}
+
+JAN_N_sel <- enact_extract(x = JAN_N, sel = nuts2_sel, var_name = "POP_JANV_N_2011")
+AOU_D_sel <- enact_extract(x = AOU_D, sel = nuts2_sel, var_name = "POP_AOU_D_2011")
+```
+
+These layers are merged to the first one. Data is prepared ! 
+
+```{r}
+JAN_N_sel <-st_set_geometry(JAN_N_sel, NULL)
+AOU_D_sel <-st_set_geometry(AOU_D_sel, NULL)
+
+pt <- merge(JAN_D_sel, JAN_N_sel[,,drop = TRUE], by = "ID")
+pt <- merge(pt, AOU_D_sel, by = "ID")
+```
+
+
+
+##  Visualizations
+
+### Difference in daytime, by NUTS3
+
+```{r}
+# Keep only points covering the study area
+pt_n3 <- st_intersection(pt, nuts3_sel)
+pt_n3 <- st_set_geometry(pt_n3, NULL)
+
+# Aggregate results by NUTS3
+n3 <- aggregate(pt_n3[,c("POP_JANV_D_2011",
+                         "POP_JANV_N_2011",
+                         "POP_AOU_D_2011")],
+                by = list(NAME_LATN = pt_n3$NAME_LATN),
+                FUN = sum)
+
+# Population in thousands
+n3[,c(2:4)] <- n3[,c(2:4)] / 1000
+
+# Barplot
+par(mar=c(6,4,4,4), cex.main = 0.9, cex.lab = 0.8, cex.axis = 0.7)
+barplot(cbind(POP_JANV_D_2011,POP_JANV_N_2011) ~ NAME_LATN, data = n3, beside = TRUE,
+        border = FALSE, las = 2 , col = c("#f7b26d", "#6d86f7"), xlab ="", axes = TRUE,
+        ylab = "Population (Thousands)")
+
+legend ("topleft", legend = c("Day","Night"),
+        fill = c("#f7b26d", "#6d86f7"), cex = 0.6, border = NA, bg = NA, bty = "n")
+
+title("Resident population, depending on the period of the day")
+```
+
+
+Population potentials for daytime and nightime are computed in a neighbourhood of 2000 meters. 
+
+It requires first to create a regular grid with the extent of Ile-de-France. Then the `mcpotential` function computes potentials on the basis of a distance matrix between the created grid (y) and the observed population (pt) in nightime and daytime. To understand more in detail the methodology behind and the core arguments (span, limit, beta), have a look to @giraud2022. 
+
+Then, the 2 potential are divided and normalized in index 100. 100 corresponding to the population in nightime. Deciles of the resulting indicator are extracted to build polygons of equipotential from the regular grid of potential points. 
+
+```{r}
+# Create 1km reggular grid
+y <- create_grid(x = pt, res = 1000)
+
+# Potential in a neighbourhood of 5000m
+y$POT_JAN_D <-  mcpotential(x = pt, y = y, var = "POP_JANV_D_2011", fun = "e",
+                            span = 2000, limit = 10000, beta = 2)
+
+y$POT_JAN_N <-  mcpotential(x = pt, y = y, var = "POP_JANV_N_2011", fun = "e",
+                            span = 2000, limit = 10000, beta = 2)
+
+# Resident population day / night
+y$DIFF_D <- y$POT_JAN_D / y$POT_JAN_N * 100 
+
+# Quantiles 10, classes, covering the study area
+discr <- st_intersection(y, nuts2_sel)
+discr <- discr[,"DIFF_D", drop = TRUE]
+discr <- quantile(discr, probs = seq(0,1,0.1), na.rm = TRUE)
+
+# Equipotential
+iso <- equipotential(x = y, var = "DIFF_D", breaks = discr, mask = nuts2_sel)
+```
+
+It allows to build a map. Separation between warm and cold colours corresponds to the class threshold the most closed to 100. 100 meaning equal population in nightime and daytime. 
+
+```{r}
+# Diverging palette around 100
+div <- which(abs(discr-100) == min(abs(discr-100)))
+pal <- cols <- mf_get_pal(n = c(div-1, 11-div), pal = c("Purp", "YlOrRd"))
+
+# Map
+par(mar=c(4,4,4,4))
+mf_map(x = iso, var = "min", type = "choro",
+       breaks = discr, pal = pal, lwd = .2, border = NA, leg_val_rnd = 1,
+       leg_pos = "topleft",
+       leg_title = paste0("Difference in resident_population\n",
+                          "Between the day and the night\n",
+                          "in 2011 (100 = resident population at night)"))
+  
+mf_map(x = nuts3_sel, col = NA, add = TRUE)
+
+tiles_front <- get_tiles(nuts2_sel, crop = TRUE, provider = "CartoDB.PositronOnlyLabels", zoom = 9)
+plot_tiles(tiles_front, add = TRUE)  
+
+mf_layout(title = "Resident population - daytime difference", 
+          credits = paste0("Realisation : Ronan Ysebaert, 2023",
+                           "Data source : ENACT-POP (Global Human Settlement Layer, JRC, European Commission, 2023"),
+          arrow = FALSE)
+```
+
+
+### Seasonal trend
+
+```{r}
+par(mar=c(6,4,4,4), cex.main = 0.9, cex.lab = 0.8, cex.axis = 0.7)
+barplot(cbind(POP_JANV_D_2011,POP_AOU_D_2011) ~ NAME_LATN, data = n3, beside = TRUE,
+        border = FALSE, las = 2 , col = c("#6bc982", "#ff697a"), xlab ="", axes = TRUE,
+        ylab = "Population (Thousands)")
+
+legend ("topleft", legend = c("January","August"),
+        fill = c("#6bc982", "#ff697a"), cex = 0.6, border = NA, bg = NA, bty = "n")
+
+title("Resident population, depending on the season")
+```
+
+For the seasonal trend we look into the absolute difference between population in January and August. The resulting picture is not exactly the same than the previous map as it highlights the population gain / loss over the seasons. 
+
+```{r}
+# Compute potential
+y$POT_AOU_D <-  mcpotential(x = pt, y = y, var = "POP_AOU_D_2011", fun = "e",
+                            span = 2000, limit = 10000, beta = 2)
+
+# Resident population day / night
+y$DIFF_D <-  y$POT_AOU_D - y$POT_JAN_D
+
+# Quantiles 10, classes, covering the study area
+discr <- st_intersection(y, nuts2_sel)
+discr <- discr[,"DIFF_D", drop = TRUE]
+discr <- quantile(discr, probs = seq(0,1,0.1), na.rm = TRUE)
+
+# Diverging palette around 100
+div <- which(abs(discr-100) == min(abs(discr-100)))
+pal <- cols <- mf_get_pal(n = c(div-1, 11-div), pal = c("Reds 3", "Greens 3"))
+
+# Equipotential
+iso <- equipotential(x = y, var = "DIFF_D", breaks = discr, mask = nuts2_sel)
+
+# Map
+par(mar=c(4,4,4,4))
+mf_map(x = iso, var = "min", type = "choro",
+       breaks = discr, pal = pal, lwd = .2, border = NA, leg_val_rnd = 1,
+       leg_pos = "topleft",
+       leg_title = paste0("Difference in resident_population\n",
+                          "Between August and January"))
+mf_map(x = nuts3_sel, col = NA, add = TRUE)
+
+tiles_front <- get_tiles(nuts2_sel, crop = TRUE, provider = "CartoDB.PositronOnlyLabels", zoom = 9)
+plot_tiles(tiles_front, add = TRUE)  
+
+mf_layout(title = "Resident population - seasonal difference", 
+          credits = paste0("Realisation : Ronan Ysebaert, 2023\n",
+                           "Data source : ENACT-POP (Global Human Settlement Layer, JRC, European Commission, 2023"),
+          arrow = FALSE)
+```
+
+
+# London (UK)
+
+Adapting this methodological framework to other regions is afterwards quite easy. Let's analyse the situation in London between daytime and nightime in January... 
+
+```{r}
+#| echo: false
+
+nuts_code <- "UKI"
+nuts1_sel <- nuts1[nuts1$NUTS_ID == nuts_code,]
+nuts3_sel <- nuts3[substr(nuts3$NUTS_ID, 1, 3) == nuts_code,]
+sel <- vect(nuts1_sel)
+
+JAN_N_sel <- enact_extract(x = JAN_N, sel = nuts1_sel, var_name = "POP_JANV_N_2011")
+JAN_D_sel <- enact_extract(x = JAN_D, sel = nuts1_sel, var_name = "POP_JANV_D_2011")
+
+JAN_N_sel <-st_set_geometry(JAN_N_sel, NULL)
+
+pt <- merge(JAN_D_sel, JAN_N_sel[,,drop = TRUE], by = "ID")
+
+pt_n3 <- st_intersection(pt, nuts3_sel)
+pt_n3 <- st_set_geometry(pt_n3, NULL)
+
+n3 <- aggregate(pt_n3[,c("POP_JANV_D_2011",
+                         "POP_JANV_N_2011")],
+                by = list(NAME_LATN = pt_n3$NAME_LATN),
+                FUN = sum)
+n3[,c(2:3)] <- n3[,c(2:3)] / 1000
+
+par(mar=c(6,4,4,4), cex.main = 0.9, cex.lab = 0.8, cex.axis = 0.7)
+barplot(cbind(POP_JANV_D_2011,POP_JANV_N_2011) ~ NAME_LATN, data = n3, beside = TRUE,
+        border = FALSE, las = 2 , col = c("#f7b26d", "#6d86f7"), xlab ="", axes = TRUE,
+        ylab = "Population (Thousands)")
+
+legend ("topleft", legend = c("Day","Night"),
+        fill = c("#f7b26d", "#6d86f7"), cex = 0.6, border = NA, bg = NA, bty = "n")
+
+title("Resident population, depending on the period of the day")
+
+
+# Create 1km reggular grid
+y <- create_grid(x = pt, res = 1000)
+
+# Potential in a neighbourhood of 5000m
+y$POT_JAN_D <-  mcpotential(x = pt, y = y, var = "POP_JANV_D_2011", fun = "e",
+                            span = 2000, limit = 10000, beta = 2)
+
+y$POT_JAN_N <-  mcpotential(x = pt, y = y, var = "POP_JANV_N_2011", fun = "e",
+                            span = 2000, limit = 10000, beta = 2)
+
+# Resident population day / night
+y$DIFF_D <- y$POT_JAN_D / y$POT_JAN_N * 100 
+
+# Quantiles 10, classes, covering the study area
+discr <- st_intersection(y, nuts1_sel)
+discr <- discr[,"DIFF_D", drop = TRUE]
+discr <- quantile(discr, probs = seq(0,1,0.1), na.rm = TRUE)
+
+# Diverging palette around 100
+div <- which(abs(discr-100) == min(abs(discr-100)))
+pal <- cols <- mf_get_pal(n = c(div-1, 11-div), pal = c("Purp", "YlOrRd"))
+
+# Equipotential
+iso <- equipotential(x = y, var = "DIFF_D", breaks = discr, mask = nuts1_sel)
+
+# Map
+par(mar=c(4,4,4,4))
+mf_map(x = iso, var = "min", type = "choro",
+       breaks = discr, pal = pal, lwd = .2, border = NA, leg_val_rnd = 1,
+       leg_pos = "topleft",
+       leg_title = paste0("Difference in resident_population\n",
+                          "Between the day and the night\n",
+                          "in 2011 (100 = resident population at night)"))
+  
+mf_map(x = nuts3_sel, col = NA, add = TRUE)
+
+tiles_front <- get_tiles(nuts1_sel, crop = TRUE, provider = "CartoDB.PositronOnlyLabels", zoom = 10)
+plot_tiles(tiles_front, add = TRUE)  
+
+mf_layout(title = "Resident population - daytime difference", 
+          credits = paste0("Realisation : Ronan Ysebaert, 2023\n",
+                           "Data source : ENACT-POP (Global Human Settlement Layer, JRC, European Commission, 2023"),
+          arrow = FALSE)
+```
+
+
+# Auvergne-Rhône-Alpes (FR)
+
+... Or in Auvergne-Rhônes-Alpes region in France between January and August. The span of the Stewart's potential has been enlarged to 5000 meters instead of 2000 meters to observe more general trends. 
+
+```{r}
+#| echo: false
+nuts_code <- "FRK"
+nuts1_sel <- nuts1[nuts1$NUTS_ID == nuts_code,]
+nuts3_sel <- nuts3[substr(nuts3$NUTS_ID, 1, 3) == nuts_code,]
+sel <- vect(nuts1_sel)
+
+JAN_N_sel <- enact_extract(x = JAN_N, sel = nuts3_sel, var_name = "POP_JANV_N_2011")
+JAN_D_sel <- enact_extract(x = JAN_D, sel = nuts3_sel, var_name = "POP_JANV_D_2011")
+
+JAN_N_sel <-st_set_geometry(JAN_N_sel, NULL)
+
+pt <- merge(JAN_D_sel, JAN_N_sel, by = "ID")
+
+pt_n3 <- st_intersection(pt, nuts3_sel)
+pt_n3 <- st_set_geometry(pt_n3, NULL)
+
+n3 <- aggregate(pt_n3[,c("POP_JANV_D_2011",
+                         "POP_JANV_N_2011")],
+                by = list(NAME_LATN = pt_n3$NAME_LATN),
+                FUN = sum)
+n3[,c(2:3)] <- n3[,c(2:3)] / 1000
+
+par(mar=c(6,4,4,4), cex.main = 0.9, cex.lab = 0.8, cex.axis = 0.7)
+barplot(cbind(POP_JANV_D_2011,POP_JANV_N_2011) ~ NAME_LATN, data = n3, beside = TRUE,
+        border = FALSE, las = 2 , col = c("#f7b26d", "#6d86f7"), xlab ="", axes = TRUE,
+        ylab = "Population (Thousands)")
+
+legend ("topleft", legend = c("Day","Night"),
+        fill = c("#f7b26d", "#6d86f7"), cex = 0.6, border = NA, bg = NA, bty = "n")
+
+title("Resident population, depending on the period of the day")
+
+
+# Create 1km reggular grid
+y <- create_grid(x = pt, res = 1000)
+
+# Potential in a neighbourhood of 5000m
+y$POT_JAN_D <-  mcpotential(x = pt, y = y, var = "POP_JANV_D_2011", fun = "e",
+                            span = 5000, limit = 10000, beta = 2)
+
+y$POT_JAN_N <-  mcpotential(x = pt, y = y, var = "POP_JANV_N_2011", fun = "e",
+                            span = 5000, limit = 10000, beta = 2)
+
+# Resident population day / night
+y$DIFF_D <- y$POT_JAN_D / y$POT_JAN_N * 100 
+
+# Quantiles 10, classes, covering the study area
+discr <- st_intersection(y, nuts3_sel)
+discr <- discr[,"DIFF_D", drop = TRUE]
+discr <- quantile(discr, probs = seq(0,1,0.1), na.rm = TRUE)
+
+# Diverging palette around 100
+div <- which(abs(discr-100) == min(abs(discr-100)))
+pal <- cols <- mf_get_pal(n = c(div-1, 11-div), pal = c("Purp", "YlOrRd"))
+
+# Equipotential
+iso <- equipotential(x = y, var = "DIFF_D", breaks = discr, mask = nuts3_sel)
+
+# Map
+par(mar=c(4,4,4,4))
+mf_map(x = iso, var = "min", type = "choro",
+       breaks = discr, pal = pal, lwd = .2, border = NA, leg_val_rnd = 1,
+       leg_pos = "topleft",
+       leg_title = paste0("Difference in resident_population\n",
+                          "Between the day and the night\n",
+                          "in 2011 (100 = resident population at night)"))
+  
+mf_map(x = nuts3_sel, col = NA, add = TRUE)
+
+tiles_front <- get_tiles(nuts3_sel, crop = TRUE, provider = "CartoDB.PositronOnlyLabels", zoom = 8)
+plot_tiles(tiles_front, add = TRUE)  
+
+mf_layout(title = "Resident population - daytime difference", 
+          credits = paste0("Realisation : Ronan Ysebaert, 2023\n",
+                           "Data source : ENACT-POP (Global Human Settlement Layer, JRC, European Commission, 2023"),
+          arrow = FALSE)
+```
+
+
+# Bretagne (FR)
+
+And in Bretagne region in France between January and August.
+
+```{r}
+#| echo: false
+
+nuts_code <- "FRH"
+nuts1_sel <- nuts1[nuts1$NUTS_ID == nuts_code,]
+nuts3_sel <- nuts3[substr(nuts3$NUTS_ID, 1, 3) == nuts_code,]
+sel <- vect(nuts1_sel)
+
+JAN_D_sel <- enact_extract(x = JAN_D, sel = nuts1_sel, var_name = "POP_JANV_D_2011")
+AOU_D_sel <- enact_extract(x = AOU_D, sel = nuts1_sel, var_name = "POP_AOU_D_2011")
+
+AOU_D_sel <-st_set_geometry(AOU_D_sel, NULL)
+
+pt <- merge(JAN_D_sel, AOU_D_sel[,,drop = TRUE], by = "ID")
+
+pt_n3 <- st_intersection(pt, nuts3_sel)
+pt_n3 <- st_set_geometry(pt_n3, NULL)
+
+n3 <- aggregate(pt_n3[,c("POP_JANV_D_2011",
+                         "POP_AOU_D_2011")],
+                by = list(NAME_LATN = pt_n3$NAME_LATN),
+                FUN = sum)
+n3[,c(2:3)] <- n3[,c(2:3)] / 1000
+
+par(mar=c(6,4,4,4), cex.main = 0.9, cex.lab = 0.8, cex.axis = 0.7)
+barplot(cbind(POP_JANV_D_2011,POP_AOU_D_2011) ~ NAME_LATN, data = n3, beside = TRUE,
+        border = FALSE, las = 2 , col = c("#6bc982", "#ff697a"), xlab ="", axes = TRUE,
+        ylab = "Population (Thousands)")
+
+legend ("topleft", legend = c("January","August"),
+        fill = c("#6bc982", "#ff697a"), cex = 0.6, border = NA, bg = NA, bty = "n")
+
+title("Resident population, depending on the period of the season")
+
+
+# Create 1km reggular grid
+y <- create_grid(x = pt, res = 1000)
+
+# Potential in a neighbourhood of 5000m
+y$POT_JAN_D <-  mcpotential(x = pt, y = y, var = "POP_JANV_D_2011", fun = "e",
+                            span = 5000, limit = 10000, beta = 2)
+
+y$POT_AOU_D <-  mcpotential(x = pt, y = y, var = "POP_AOU_D_2011", fun = "e",
+                            span = 5000, limit = 10000, beta = 2)
+
+# Resident population day / night
+y$DIFF_D <-  y$POT_AOU_D - y$POT_JAN_D
+
+# Quantiles 10, classes, covering the study area
+discr <- st_intersection(y, nuts1_sel)
+discr <- discr[,"DIFF_D", drop = TRUE]
+discr <- quantile(discr, probs = seq(0,1,0.1), na.rm = TRUE)
+
+# Diverging palette around 100
+div <- which(abs(discr-100) == min(abs(discr-100)))
+pal <- cols <- mf_get_pal(n = c(div-1, 11-div), pal = c("Reds 3", "Greens 3"))
+
+# Equipotential
+iso <- equipotential(x = y, var = "DIFF_D", breaks = discr, mask = nuts1_sel)
+
+# Map
+par(mar=c(4,4,4,4))
+mf_map(x = iso, var = "min", type = "choro",
+       breaks = discr, pal = pal, lwd = .2, border = NA, leg_val_rnd = 1,
+       leg_pos = "topleft",
+       leg_title = paste0("Difference in resident_population\n",
+                          "Between August and January"))
+mf_map(x = nuts3_sel, col = NA, add = TRUE)
+tiles_front <- get_tiles(nuts2_sel, crop = TRUE, provider = "CartoDB.PositronOnlyLabels", zoom = 8)
+plot_tiles(tiles_front, add = TRUE)  
+mf_layout(title = "Resident population - seasonal difference", 
+          credits = paste0("Realisation : Ronan Ysebaert, 2023\n",
+                           "Data source : ENACT-POP (Global Human Settlement Layer, JRC, European Commission, 2023"),
+          arrow = FALSE)
+```
+
+
+```{r}
+sessionInfo()
+```
